@@ -128,6 +128,9 @@ fun SettingsScreen(
     }
     var promptEdited by remember { mutableStateOf(false) }
 
+    // ---------- Состояние: диалог выбора иконки ----------
+    var showIconPicker by remember { mutableStateOf(false) }
+
     // ---------- Состояние: медиа-тест ----------
     var mediaVolumePercent by remember { mutableStateOf(MediaController(context).currentVolumePercent()) }
 
@@ -262,7 +265,6 @@ fun SettingsScreen(
             onValueChange = {
                 promptDraft = it
                 promptEdited = true
-                // Автосохранение промпта на лету
                 settingsRepo.setCustomSystemPrompt(it.ifBlank { null })
             },
             modifier = Modifier
@@ -348,6 +350,43 @@ fun SettingsScreen(
             colorOf = { null },
             onSelected = { settingsRepo.setOverlayStyle(it) }
         )
+
+        Spacer(Modifier.height(8.dp))
+
+        // ----- Высота подсказок над оверлеем -----
+        VisualSliderRow(
+            title = "Высота подсказок в оверлее",
+            value = settingsRepo.overlayChatHeightPercent.toFloat(),
+            valueRange = 0f..80f,
+            label = "${settingsRepo.overlayChatHeightPercent} %",
+            onChange = { settingsRepo.setOverlayChatHeightPercent(it.toInt()) }
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // ----- Иконка кнопки активации -----
+        Surface(
+            color = Color(0xFF252535),
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 3.dp)
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text("Иконка кнопки активации", fontSize = 14.sp, color = Color.White)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    settingsRepo.activationIconName
+                        ?: settingsRepo.activationIconUri?.let { "Своя картинка" }
+                        ?: "По стилю пресета",
+                    fontSize = 11.sp, color = Color(0xFF9090A0)
+                )
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = { showIconPicker = true }) {
+                    Text("Выбрать иконку", color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
 
         Spacer(Modifier.height(24.dp))
 
@@ -1375,6 +1414,33 @@ fun SettingsScreen(
             }
         )
     }
+
+    // ================================================================
+    // Диалог выбора иконки кнопки активации
+    // ================================================================
+    if (showIconPicker) {
+        ActivationIconPickerDialog(
+            palette = VisualTheme.palette(settingsRepo.accentHue),
+            currentVectorName = settingsRepo.activationIconName,
+            currentUri = settingsRepo.activationIconUri,
+            onSelectVector = { name ->
+                settingsRepo.setActivationIconName(name)
+                settingsRepo.setActivationIconUri(null)
+                showIconPicker = false
+            },
+            onSelectUri = { uri ->
+                settingsRepo.setActivationIconUri(uri)
+                settingsRepo.setActivationIconName(null)
+                showIconPicker = false
+            },
+            onClear = {
+                settingsRepo.setActivationIconName(null)
+                settingsRepo.setActivationIconUri(null)
+                showIconPicker = false
+            },
+            onDismiss = { showIconPicker = false }
+        )
+    }
 }
 
 // ====================================================================
@@ -1493,6 +1559,43 @@ private fun <T> VisualChoiceRow(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Строка с ползунком для числового параметра.
+ */
+@Composable
+private fun VisualSliderRow(
+    title: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    label: String,
+    onChange: (Float) -> Unit
+) {
+    Surface(
+        color = Color(0xFF252535),
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row {
+                Text(
+                    title,
+                    fontSize = 14.sp,
+                    color = Color.White,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(label, fontSize = 12.sp, color = Color(0xFF9090A0))
+            }
+            Slider(
+                value = value,
+                onValueChange = onChange,
+                valueRange = valueRange
+            )
         }
     }
 }
