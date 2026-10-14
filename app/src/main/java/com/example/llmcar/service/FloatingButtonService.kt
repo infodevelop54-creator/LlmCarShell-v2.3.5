@@ -9,7 +9,6 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.compose.foundation.background
@@ -44,32 +43,43 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.llmcar.LlmCarApp
 import com.example.llmcar.MainActivity
 import com.example.llmcar.R
+import com.example.llmcar.data.HistoryRepository
 import com.example.llmcar.data.SettingsRepository
+import com.example.llmcar.data.db.HistoryEntity
+import com.example.llmcar.ui.ActivationIcon
+import com.example.llmcar.ui.ActivationIconPickerDialog
 import com.example.llmcar.ui.ChatViewModel
 import com.example.llmcar.ui.OverlayInputOverlay
 import com.example.llmcar.ui.OverlayRoundButton
 import com.example.llmcar.ui.theme.VisualTheme
-import com.example.llmcar.util.AppSignals
-import kotlin.math.abs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
- * v2.3.4 — круглая кнопка активации ассистента + оверлей ввода.
+ * v2.3.5 — круглая кнопка активации + оверлей ввода с градиентной историей.
  *
- * Два независимых окна WindowManager:
- *   1) pillView  — круглая кнопка. Перетаскивается пальцем, не прилипает к краям,
- *                  позиция сохраняется. Тап → показать оверлей ввода.
- *   2) overlayView — появляется по тапу на кнопку, оверлей ввода снизу,
- *                    без фона. Сразу запускает микрофон.
+ * Два окна WindowManager:
+ *   1) pillView    — круглая кнопка (drag через долгое удержание 1 сек,
+ *                    смена иконки через удержание 2.5 сек, тап — открыть оверлей);
+ *   2) overlayView — оверлей ввода + градиентное поле с историей.
  *
- * Страница чата (MainActivity → ChatScreen) открывается только по тапу
- * на три полоски в оверлее.
+ * История берётся из Room (HistoryRepository.observe()).
  */
 class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner {
 
     private lateinit var wm: WindowManager
     private lateinit var settings: SettingsRepository
+    private lateinit var historyRepo: HistoryRepository
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateController = SavedStateRegistryController.create(this)
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // --------- Круглая кнопка ---------
     private var pillView: View? = null
@@ -79,12 +89,17 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
     private var overlayView: View? = null
     private lateinit var overlayParams: WindowManager.LayoutParams
 
-    // --------- Состояние перетаскивания ---------
-    private var dragging: Boolean = false
-    private var dragDownX: Float = 0f
-    private var dragDownY: Float = 0f
-    private var dragStartX: Int = 0
-    private var dragStartY: Int = 0
+    // --------- История для оверлея ---------
+    private val _history = MutableStateFlow<List<HistoryEntity>>(emptyList())
+    private val historyFlow: StateFlow<List<HistoryEntity>> = _history.asStateFlow()
+    private var historyJob: Job? = null
+
+    // --------- Иконка кнопки (для перерисовки) ---------
+    private var iconPickerVisible by mutableStateOf(false)
+
+    // --------- Позиция кнопки ---------
+    private var currentPosX: Int = 0
+    private var currentPosY: Int = 0
 
     private val vmStore = ViewModelStore()
     private val vmFactory = object : ViewModelProvider.Factory {
@@ -107,8 +122,25 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
         startForeground(NOTIF_ID, notif())
         settings = SettingsRepository(this)
+        historyRepo = HistoryRepository(this)
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        currentPosX = settings.overlayPosX
+        currentPosY = settings.overlayPosY
         attachPill()
+        startHistoryObserver()
+    }
+
+    // ============================================================
+    // История из Room
+    // ============================================================
+
+    private fun startHistoryObserver() {
+        historyJob = scope.launch {
+            historyRepo.observe().collect { list ->
+                // Берём только последние 20 записей
+                _history.value = list.take(20)
+            }
+        }
     }
 
     // ============================================================
@@ -126,8 +158,8 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = settings.overlayPosX
-            y = settings.overlayPosY
+            x = currentPosX
+            y = currentPosY
         }
 
         val cv = ComposeView(this)
@@ -137,67 +169,28 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
         cv.setContent {
             PillRoot(
                 settings = settings,
-                onTap = { showInputOverlay() }
+                showIconPicker = iconPickerVisible,
+                onIconPickerDismiss = { iconPickerVisible = false },
+                onTap = { showInputOverlay() },
+                onStartDrag = { /* пока ничего */ },
+                onMoveDrag = { dx, dy -> movePillBy(dx, dy) },
+                onEndDrag = {
+                    settings.setOverlayPosX(currentPosX)
+                    settings.setOverlayPosY(currentPosY)
+                },
+                onShowIconPicker = { iconPickerVisible = true }
             )
         }
-        cv.setOnTouchListener(pillTouchListener())
         pillView = cv
         wm.addView(pillView, pillParams)
     }
 
-    private fun pillTouchListener(): View.OnTouchListener {
-        return object : View.OnTouchListener {
-            override fun onTouch(v: View, event: MotionEvent): Boolean {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        dragging = false
-                        dragDownX = event.rawX
-                        dragDownY = event.rawY
-                        dragStartX = pillParams.x
-                        dragStartY = pillParams.y
-                        return false
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dx = event.rawX - dragDownX
-                        val dy = event.rawY - dragDownY
-                        if (!dragging && (abs(dx) > 12f || abs(dy) > 12f)) {
-                            dragging = true
-                            v.parent?.requestDisallowInterceptTouchEvent(true)
-                        }
-                        if (dragging) {
-                            pillParams.x = dragStartX + dx.toInt()
-                            pillParams.y = dragStartY + dy.toInt()
-                            try {
-                                wm.updateViewLayout(v, pillParams)
-                            } catch (_: Exception) {
-                            }
-                        }
-                        return dragging
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (dragging) {
-                            // НЕ прилипаем к краям. Только страхуем, чтобы
-                            // кнопка не ушла за пределы видимой области.
-                            clampPillToScreen()
-                            settings.setOverlayPosX(pillParams.x)
-                            settings.setOverlayPosY(pillParams.y)
-                        }
-                        return dragging
-                    }
-                    else -> return false
-                }
-            }
-        }
-    }
-
-    private fun clampPillToScreen() {
+    private fun movePillBy(dx: Float, dy: Float) {
         val v = pillView ?: return
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
-        val w = if (v.width > 0) v.width else 100
-        val h = if (v.height > 0) v.height else 100
-        pillParams.x = pillParams.x.coerceIn(0, (screenW - w).coerceAtLeast(0))
-        pillParams.y = pillParams.y.coerceIn(0, (screenH - h).coerceAtLeast(0))
+        currentPosX += dx.toInt()
+        currentPosY += dy.toInt()
+        pillParams.x = currentPosX
+        pillParams.y = currentPosY
         try {
             wm.updateViewLayout(v, pillParams)
         } catch (_: Exception) {
@@ -231,13 +224,14 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
         cv.setContent {
             OverlayRoot(
                 settings = settings,
+                historyFlow = historyFlow,
                 onSend = { text ->
                     chatVm.send(text)
                     hideInputOverlay()
                 },
                 onOpenChat = {
                     hideInputOverlay()
-                    openChatFromOverlay()
+                    openChat()
                 },
                 onClose = { hideInputOverlay() }
             )
@@ -255,11 +249,7 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
         }
     }
 
-    // ============================================================
-    // Открытие страницы чата (по трём полоскам)
-    // ============================================================
-
-    private fun openChatFromOverlay() {
+    private fun openChat() {
         val i = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(MainActivity.EXTRA_SCROLL_TO_BOTTOM, true)
@@ -297,13 +287,12 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
     }
 
     override fun onDestroy() {
+        historyJob?.cancel()
+        scope.cancel()
         hideInputOverlay()
         val v = pillView
         if (v != null) {
-            try {
-                wm.removeView(v)
-            } catch (_: Exception) {
-            }
+            try { wm.removeView(v) } catch (_: Exception) {}
         }
         pillView = null
         vmStore.clear()
@@ -318,39 +307,77 @@ class FloatingButtonService : Service(), SavedStateRegistryOwner, LifecycleOwner
 }
 
 // =============================================================
-// Compose: обёртка над круглой кнопкой
+// Compose: круг + диалог выбора иконки
 // =============================================================
 
 @Composable
 private fun PillRoot(
     settings: SettingsRepository,
-    onTap: () -> Unit
+    showIconPicker: Boolean,
+    onIconPickerDismiss: () -> Unit,
+    onTap: () -> Unit,
+    onStartDrag: () -> Unit,
+    onMoveDrag: (Float, Float) -> Unit,
+    onEndDrag: () -> Unit,
+    onShowIconPicker: () -> Unit
 ) {
     val palette = VisualTheme.palette(settings.accentHue)
-    val icon = VisualTheme.presetIcon(settings.presetIconStyle)
+    val fallbackIcon = VisualTheme.presetIcon(settings.presetIconStyle)
+    val chosenVector = ActivationIcon.vector(settings.activationIconName)
 
     OverlayRoundButton(
         palette = palette,
-        icon = icon,
-        onClick = onTap
+        icon = chosenVector,
+        iconUri = settings.activationIconUri,
+        fallbackIcon = fallbackIcon,
+        onTap = onTap,
+        onStartDrag = onStartDrag,
+        onMoveDrag = onMoveDrag,
+        onEndDrag = onEndDrag,
+        onShowIconPicker = onShowIconPicker
     )
+
+    if (showIconPicker) {
+        ActivationIconPickerDialog(
+            palette = palette,
+            currentVectorName = settings.activationIconName,
+            currentUri = settings.activationIconUri,
+            onSelectVector = { name ->
+                settings.setActivationIconName(name)
+                settings.setActivationIconUri(null)
+                onIconPickerDismiss()
+            },
+            onSelectUri = { uri ->
+                settings.setActivationIconUri(uri)
+                settings.setActivationIconName(null)
+                onIconPickerDismiss()
+            },
+            onClear = {
+                settings.setActivationIconName(null)
+                settings.setActivationIconUri(null)
+                onIconPickerDismiss()
+            },
+            onDismiss = onIconPickerDismiss
+        )
+    }
 }
 
 // =============================================================
-// Compose: корень оверлея ввода (с прозрачной подложкой)
+// Compose: корень оверлея ввода (прозрачная подложка + контент снизу)
 // =============================================================
 
 @Composable
 private fun OverlayRoot(
     settings: SettingsRepository,
+    historyFlow: StateFlow<List<HistoryEntity>>,
     onSend: (String) -> Unit,
     onOpenChat: () -> Unit,
     onClose: () -> Unit
 ) {
     val palette = VisualTheme.palette(settings.accentHue)
     val pillHeightDp = VisualTheme.pillHeight(settings.pillSize)
+    val history by historyFlow.collectAsState()
 
-    // Полноэкранная прозрачная подложка. Тап вне пилюли закрывает оверлей.
     Box(
         Modifier
             .fillMaxSize()
@@ -362,19 +389,20 @@ private fun OverlayRoot(
             ),
         contentAlignment = Alignment.BottomCenter
     ) {
-        // Проглатываем клики по самой пилюле, чтобы они не закрывали оверлей
         Box(
             Modifier
                 .fillMaxWidth()
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
-                    onClick = { /* ничего */ }
+                    onClick = { /* проглатываем */ }
                 )
         ) {
             OverlayInputOverlay(
                 palette = palette,
                 pillHeightDp = pillHeightDp,
+                historyHeightPercent = settings.overlayChatHeightPercent,
+                history = history,
                 onSend = onSend,
                 onOpenChat = onOpenChat,
                 onClose = onClose
