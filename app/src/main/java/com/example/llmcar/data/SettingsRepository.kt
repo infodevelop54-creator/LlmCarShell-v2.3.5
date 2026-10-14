@@ -73,9 +73,23 @@ class SettingsRepository(context: Context) {
     var overlayStyle by mutableStateOf(
         runCatching { OverlayStyle.valueOf(prefs.getString(KEY_OVERLAY_STYLE, "GLOW") ?: "GLOW") }
             .getOrDefault(OverlayStyle.GLOW)); private set
+
     // --------- Позиция плавающей кнопки ---------
     var overlayPosX by mutableStateOf(prefs.getInt(KEY_OVERLAY_X, 40)); private set
     var overlayPosY by mutableStateOf(prefs.getInt(KEY_OVERLAY_Y, 300)); private set
+
+    // --------- Визуальные настройки оверлея ввода ---------
+    /** Высота градиентного поля с историей над оверлеем, % от высоты экрана (0..80). */
+    var overlayChatHeightPercent by mutableStateOf(
+        prefs.getInt(KEY_OVERLAY_CHAT_HEIGHT, 35)); private set
+
+    /** Имя выбранной иконки кнопки активации. null = использовать presetIconStyle. */
+    var activationIconName by mutableStateOf(
+        prefs.getString(KEY_ACTIVATION_ICON, null)); private set
+
+    /** Путь к локальной картинке-иконке (file:// или content://), null = нет. */
+    var activationIconUri by mutableStateOf(
+        prefs.getString(KEY_ACTIVATION_ICON_URI, null)); private set
 
     // --------- Сеттеры ---------
 
@@ -187,7 +201,7 @@ class SettingsRepository(context: Context) {
         prefs.edit().putString(KEY_OVERLAY_STYLE, v.name).apply()
     }
 
-        @JvmName("applyOverlayPosX")
+    @JvmName("applyOverlayPosX")
     fun setOverlayPosX(v: Int) {
         overlayPosX = v
         prefs.edit().putInt(KEY_OVERLAY_X, v).apply()
@@ -197,6 +211,25 @@ class SettingsRepository(context: Context) {
     fun setOverlayPosY(v: Int) {
         overlayPosY = v
         prefs.edit().putInt(KEY_OVERLAY_Y, v).apply()
+    }
+
+    @JvmName("applyOverlayChatHeightPercent")
+    fun setOverlayChatHeightPercent(percent: Int) {
+        val v = percent.coerceIn(0, 80)
+        overlayChatHeightPercent = v
+        prefs.edit().putInt(KEY_OVERLAY_CHAT_HEIGHT, v).apply()
+    }
+
+    @JvmName("applyActivationIconName")
+    fun setActivationIconName(name: String?) {
+        activationIconName = name
+        prefs.edit().putString(KEY_ACTIVATION_ICON, name).apply()
+    }
+
+    @JvmName("applyActivationIconUri")
+    fun setActivationIconUri(uri: String?) {
+        activationIconUri = uri
+        prefs.edit().putString(KEY_ACTIVATION_ICON_URI, uri).apply()
     }
 
     fun applyRamProfile(profile: String) {
@@ -259,9 +292,15 @@ class SettingsRepository(context: Context) {
         private const val KEY_PILL_SIZE = "pill_size"
         private const val KEY_PRESET_ICON = "preset_icon"
         private const val KEY_OVERLAY_STYLE = "overlay_style"
+
         // --------- Ключи позиции оверлея ---------
         private const val KEY_OVERLAY_X = "overlay_pos_x"
         private const val KEY_OVERLAY_Y = "overlay_pos_y"
+
+        // --------- Ключи оверлея ввода / иконки кнопки ---------
+        private const val KEY_OVERLAY_CHAT_HEIGHT = "overlay_chat_height_percent"
+        private const val KEY_ACTIVATION_ICON = "activation_icon_name"
+        private const val KEY_ACTIVATION_ICON_URI = "activation_icon_uri"
 
         const val DEFAULT_WAKE_WORD = "привет ассистент"
     }
